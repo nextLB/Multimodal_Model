@@ -1,10 +1,16 @@
 # yolo_train_main.py
 
 import logging
+import os
 import random
 import sys
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 import numpy as np
 import torch
@@ -32,7 +38,7 @@ from loss.yolo_loss import (
 # 配置
 # ============================================================
 
-PRETRAINED_WEIGHTS = r"D:\LB\results\pre_models\yolo26n-seg.pt"
+PRETRAINED_WEIGHTS = r"D:\LB\results\pre_models\yolo26m-seg.pt" # n / s / m / l / x
 SAVE_DIR = "runs/train_yolo26n_seg_unified"
 RUN_NAME = "exp01"
 
@@ -143,6 +149,98 @@ def seed_everything(seed=42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def _format_bytes(num_bytes):
+    gib = float(num_bytes) / (1024 ** 3)
+    return f"{gib:.2f}GiB"
+
+
+def get_resource_usage(device=DEVICE):
+    usage = {}
+    process = psutil.Process(os.getpid()) if psutil is not None else None
+
+    if process is not None:
+        usage["proc_cpu"] = process.cpu_percent(interval=None)
+        mem_info = process.memory_info()
+        usage["proc_mem"] = mem_info.rss
+        usage["sys_cpu"] = psutil.cpu_percent(interval=None)
+        vm = psutil.virtual_memory()
+        usage["sys_mem_used"] = vm.used
+        usage["sys_mem_total"] = vm.total
+    else:
+        try:
+            load = os.getloadavg()
+            usage["loadavg"] = load[0]
+        except Exception:
+            pass
+
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        try:
+            dev = torch.device(device)
+            dev_idx = dev.index if dev.index is not None else torch.cuda.current_device()
+            usage["gpu_name"] = torch.cuda.get_device_name(dev_idx)
+            usage["gpu_mem_alloc"] = torch.cuda.memory_allocated(dev_idx)
+            usage["gpu_mem_reserved"] = torch.cuda.memory_reserved(dev_idx)
+            if hasattr(torch.cuda, "max_memory_allocated"):
+                usage["gpu_mem_max_alloc"] = torch.cuda.max_memory_allocated(dev_idx)
+            total = None
+            if hasattr(torch.cuda, "get_device_properties"):
+                total = torch.cuda.get_device_properties(dev_idx).total_memory
+            if total is not None:
+                usage["gpu_mem_total"] = total
+            util = None
+            if hasattr(torch.cuda, "utilization"):
+                try:
+                    util = torch.cuda.utilization(dev_idx)
+                except Exception:
+                    util = None
+            if util is not None:
+                usage["gpu_util"] = util
+        except Exception as exc:
+            usage["gpu_error"] = str(exc)
+
+    return usage
+
+
+def format_resource_usage(usage, device=DEVICE):
+    parts = [f"device={device}"]
+    if "proc_cpu" in usage:
+        parts.append(f"proc_cpu={usage['proc_cpu']:.1f}%")
+    if "sys_cpu" in usage:
+        parts.append(f"sys_cpu={usage['sys_cpu']:.1f}%")
+    if "proc_mem" in usage:
+        parts.append(f"proc_mem={_format_bytes(usage['proc_mem'])}")
+    if "sys_mem_used" in usage and "sys_mem_total" in usage:
+        parts.append(
+            f"sys_mem={_format_bytes(usage['sys_mem_used'])}/{_format_bytes(usage['sys_mem_total'])}"
+        )
+    if "loadavg" in usage:
+        parts.append(f"loadavg1={usage['loadavg']:.2f}")
+    if "gpu_name" in usage:
+        parts.append(f"gpu={usage['gpu_name']}")
+    if "gpu_util" in usage:
+        parts.append(f"gpu_util={usage['gpu_util']}%")
+    if "gpu_mem_alloc" in usage:
+        gpu_mem = f"gpu_mem={_format_bytes(usage['gpu_mem_alloc'])}"
+        if "gpu_mem_reserved" in usage:
+            gpu_mem += f"/reserved {_format_bytes(usage['gpu_mem_reserved'])}"
+        if "gpu_mem_total" in usage:
+            gpu_mem += f"/total {_format_bytes(usage['gpu_mem_total'])}"
+        parts.append(gpu_mem)
+    if "gpu_mem_max_alloc" in usage:
+        parts.append(f"gpu_max_alloc={_format_bytes(usage['gpu_mem_max_alloc'])}")
+    if "gpu_error" in usage:
+        parts.append(f"gpu_error={usage['gpu_error']}")
+    if len(parts) == 1:
+        parts.append("resource=unavailable")
+    return " | ".join(parts)
+
+
+def log_resource_usage(prefix="[Resource]", device=DEVICE):
+    usage = get_resource_usage(device=device)
+    logger.info("%s %s", prefix, format_resource_usage(usage, device=device))
+    return usage
 
 
 def move_batch_to_device(images, targets, device):
@@ -429,6 +527,9 @@ def main():
         EPOCHS, BATCH_SIZE, IMAGE_SIZE, DEVICE,
         LR0, LRF, WARMUP_EPOCHS, VAL_INTERVAL,
     )
+    if psutil is None:
+        logger.info("psutil 未安装，CPU/内存监控将受限；可安装 psutil 获得完整信息")
+    log_resource_usage("[Resource][startup]", device=DEVICE)
     seed_everything(SEED)
 
     voc = PascalVoc2012(
@@ -598,6 +699,10 @@ def main():
                     f"Mask: {mask_loss.item():.4f} | "
                     f"Total: {loss.item():.4f}"
                 )
+                log_resource_usage(
+                    f"[Resource][epoch {epoch+1} iter {batch_idx+1}]",
+                    device=DEVICE,
+                )
 
             global_step += 1
 
@@ -611,6 +716,7 @@ def main():
             f"  Mask Loss: {avg_mask:.4f}\n"
             f"  Total:     {avg_total:.4f}\n"
         )
+        log_resource_usage(f"[Resource][epoch {epoch+1} done]", device=DEVICE)
 
         if (epoch + 1) % VAL_INTERVAL == 0:
             val_metrics = evaluate(

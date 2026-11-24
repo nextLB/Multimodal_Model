@@ -39,7 +39,7 @@ from loss.yolo_loss import (
 # ============================================================
 
 PRETRAINED_WEIGHTS = r"D:\LB\results\pre_models\yolo26m-seg.pt" # n / s / m / l / x
-SAVE_DIR = "runs/train_yolo26n_seg_unified"
+SAVE_DIR = r"D:\LB\results\runs/train_yolo26n_seg_unified"
 RUN_NAME = "exp01"
 
 VOC_ROOT = r"D:\LB\Datasets\PASCAL_VOC2012\VOCdevkit\VOC2012"
@@ -73,7 +73,7 @@ SEED = 42
 LOG_INTERVAL = 10
 SAVE_PERIOD = 10
 
-LOG_ROOT = "runs/logs"
+LOG_ROOT = r"D:\LB\results\runs/logs"
 LOG_NAME = "train"
 
 
